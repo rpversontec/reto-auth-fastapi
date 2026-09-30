@@ -1,0 +1,74 @@
+import json
+import time
+from collections.abc import Iterator
+
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ..db import SessionLocal, get_db
+from ..deps import Identidad, requiere_profesor, usuario_actual
+from ..errors import ApiError
+from ..models import Aviso
+from ..schemas import AvisoOut, NuevoAviso
+
+router = APIRouter(prefix="/avisos", tags=["avisos"])
+
+
+@router.get("", response_model=list[AvisoOut])
+def listar(desde: int = 0, _: Identidad = Depends(usuario_actual), db: Session = Depends(get_db)) -> list[Aviso]:
+    """Todo el tablón exige sesión, incluso leerlo. `?desde=N`: solo los avisos con id mayor a N."""
+    return list(db.scalars(select(Aviso).where(Aviso.id > desde).order_by(Aviso.id.desc()).limit(100)))
+
+
+@router.get("/stream")
+def stream(request: Request, quien: Identidad = Depends(usuario_actual), desde: int = 0) -> StreamingResponse:
+    """Server-Sent Events: la conexión se queda abierta y empuja cada aviso nuevo.
+
+    No hay pub/sub: el servidor consulta la tabla cada 3 s. Para el reto alcanza,
+    y deja claro quién sondea a quién: el servidor a su base, nunca el teléfono
+    al servidor. Vive hasta que el token expira; el cliente reconecta con
+    `Last-Event-ID` y no pierde nada de en medio.
+    """
+    ultimo = int(request.headers.get("Last-Event-ID") or desde or 0)
+
+    def eventos() -> Iterator[str]:
+        nonlocal ultimo
+        yield f": conectado como {quien.usuario}, desde el aviso {ultimo}\n\n"
+        tic = 0
+        while time.time() < quien.exp:
+            # Una sesión corta por vuelta: la conexión vive minutos, una sesión abierta no debe.
+            with SessionLocal() as db:
+                nuevos = db.scalars(select(Aviso).where(Aviso.id > ultimo).order_by(Aviso.id.asc()).limit(50)).all()
+            for aviso in nuevos:
+                ultimo = aviso.id
+                data = json.dumps(AvisoOut.model_validate(aviso).model_dump(), ensure_ascii=False)
+                yield f"id: {aviso.id}\nevent: aviso\ndata: {data}\n\n"
+            tic += 1
+            if tic % 5 == 0:
+                yield ": ping\n\n"
+            time.sleep(3)
+        # El token venció: se cierra a propósito. El cliente refresca y vuelve.
+        yield "event: fin\ndata: token_expirado\n\n"
+
+    return StreamingResponse(eventos(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.post("", response_model=AvisoOut, status_code=201)
+def crear(body: NuevoAviso, quien: Identidad = Depends(requiere_profesor), db: Session = Depends(get_db)) -> Aviso:
+    aviso = Aviso(titulo=body.titulo, cuerpo=body.cuerpo, autor=quien.usuario)
+    db.add(aviso)
+    db.commit()
+    db.refresh(aviso)
+    return aviso
+
+
+@router.delete("/{id}", status_code=204)
+def borrar(id: int, _: Identidad = Depends(requiere_profesor), db: Session = Depends(get_db)) -> Response:
+    aviso = db.get(Aviso, id)
+    if aviso is None:
+        raise ApiError(404, f"No existe el aviso {id}")
+    db.delete(aviso)
+    db.commit()
+    return Response(status_code=204)

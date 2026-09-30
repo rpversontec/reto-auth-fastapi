@@ -1,0 +1,14 @@
+[project]
+name = "auth-fastapi"
+version = "0.1.0"
+description = "Modulo de autenticacion y autorizacion de referencia para el reto de TC2007B: FastAPI + PostgreSQL, mismo contrato que la API de la Practica 6."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.53.0",
+    "sqlalchemy==2.0.54",
+    "psycopg[binary]==3.3.6",
+    "pyjwt==2.14.0",
+    "pwdlib[argon2]==0.3.1",
+    "pydantic-settings==2.15.0",
+]
