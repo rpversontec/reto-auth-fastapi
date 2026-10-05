@@ -12,7 +12,8 @@ distintas, y responden con códigos distintos: 401 y 403.
 
 from dataclasses import dataclass
 
-from fastapi import Depends, Request
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .config import settings
 from .errors import ApiError
@@ -26,12 +27,17 @@ class Identidad:
     exp: int
 
 
-def usuario_actual(request: Request) -> Identidad:
+# Declarar el esquema Bearer es lo que hace aparecer «Authorize» y los candados en /docs.
+# auto_error=False: si falta el token, el 401 lo da usuario_actual con la forma del
+# contrato ({error, code, hint}), no FastAPI con {"detail": ...}, que la app no lee.
+_bearer = HTTPBearer(auto_error=False)
+
+
+def usuario_actual(credenciales: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> Identidad:
     """Lee `Authorization: Bearer <jwt>`, verifica la firma y la fecha."""
-    raw = request.headers.get("Authorization", "").strip()
-    if not raw.lower().startswith("bearer "):
+    if credenciales is None:
         raise ApiError(401, "Falta el token de acceso", "falta_token", "Manda `Authorization: Bearer <accessToken>`.")
-    token = raw[7:].strip()
+    token = credenciales.credentials
     try:
         payload = verify_jwt(token, settings.jwt_secret)
     except TokenInvalido as e:
